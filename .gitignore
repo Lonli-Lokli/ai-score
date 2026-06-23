@@ -1,0 +1,28 @@
+# Compiled binaries
+/aiscore-spike
+/aiscore-spike.exe
+*.exe
+*.out
+*.test
+*.prof
+
+# Go workspace / vendoring
+/vendor/
+go.work
+go.work.sum
+
+# Secrets / local env (never commit the API key)
+.env
+*.env
+.envrc
+
+# Spike output / logs
+/out/
+*.log
+
+# Editor & OS cruft
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

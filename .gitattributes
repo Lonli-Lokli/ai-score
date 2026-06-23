@@ -1,0 +1,17 @@
+# Normalize line endings — LF in the repo, regardless of OS checkout.
+* text=auto eol=lf
+
+*.go   text eol=lf diff=golang
+*.mod  text eol=lf
+*.sum  text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+
+# Binary assets — never normalized or diffed as text.
+*.exe binary
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
