@@ -39,8 +39,8 @@ var skipDirs = map[string]bool{
 
 const maxFileBytes = 60 * 1024 // skip very large / generated files
 
-// ingest walks root and returns scorable source files, capped at maxFiles.
-func ingest(root string, maxFiles int) ([]*FileChunk, error) {
+// ingest walks root and returns all scorable source files (the caller caps).
+func ingest(root string) ([]*FileChunk, error) {
 	var chunks []*FileChunk
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -73,9 +73,6 @@ func ingest(root string, maxFiles int) ([]*FileChunk, error) {
 	})
 	if err != nil {
 		return nil, err
-	}
-	if maxFiles > 0 && len(chunks) > maxFiles {
-		chunks = chunks[:maxFiles]
 	}
 	return chunks, nil
 }

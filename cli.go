@@ -26,8 +26,9 @@ func (b *cliBackend) CountTokens(ctx context.Context, text string) (int64, error
 // cliEnvelope is the JSON shape from `claude -p --output-format json`.
 // VERIFY field names with: claude -p "hi" --output-format json
 type cliEnvelope struct {
-	Result       json.RawMessage `json:"result"` // string or object (handled by unwrapResult)
-	TotalCostUSD float64         `json:"total_cost_usd"`
+	Result           json.RawMessage `json:"result"`            // assistant prose (NOT the schema output)
+	StructuredOutput json.RawMessage `json:"structured_output"` // the --json-schema validated object
+	TotalCostUSD     float64         `json:"total_cost_usd"`
 	IsError      bool            `json:"is_error"`
 	Usage        struct {
 		InputTokens              int64 `json:"input_tokens"`
@@ -70,6 +71,10 @@ func (b *cliBackend) Score(ctx context.Context, system, user string, schema Sche
 		CacheRead:   env.Usage.CacheReadInputTokens,
 		CacheWrite:  env.Usage.CacheCreationInputTokens,
 		ReportedUSD: env.TotalCostUSD,
+	}
+	// --json-schema output lands in structured_output, not result.
+	if so := bytes.TrimSpace(env.StructuredOutput); len(so) > 0 && string(so) != "null" {
+		return string(so), u, nil
 	}
 	return unwrapResult(env.Result), u, nil
 }

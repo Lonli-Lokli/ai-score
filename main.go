@@ -24,7 +24,7 @@ import (
 func main() {
 	path := flag.String("path", ".", "repo directory to score")
 	n := flag.Int("n", 3, "median-of-N samples for Design OT")
-	maxFiles := flag.Int("max-files", 40, "cap files scored (spike cost guard)")
+	maxFiles := flag.Int("max-files", 40, "max files to score; 0 = all (cost guard)")
 	backendName := flag.String("backend", "api", "judge backend: api | cli")
 	flag.Parse()
 
@@ -46,14 +46,19 @@ func main() {
 	fmt.Printf("Backend: %s\n", be.Name())
 
 	// 1. Ingest -------------------------------------------------------------
-	chunks, err := ingest(*path, *maxFiles)
+	chunks, err := ingest(*path)
 	if err != nil {
 		die("ingest: %v", err)
 	}
 	if len(chunks) == 0 {
 		die("no scorable source files under %s", *path)
 	}
-	fmt.Printf("Ingested %d files from %s\n", len(chunks), *path)
+	if *maxFiles > 0 && len(chunks) > *maxFiles {
+		fmt.Printf("Found %d source files; scoring the first %d (use -max-files 0 to score all)\n", len(chunks), *maxFiles)
+		chunks = chunks[:*maxFiles]
+	} else {
+		fmt.Printf("Ingested %d files from %s\n", len(chunks), *path)
+	}
 
 	// 2. Pre-count tokens when the backend supports it (api) ----------------
 	if be.CanPreCount() {

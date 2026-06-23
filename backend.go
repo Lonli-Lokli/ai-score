@@ -10,10 +10,11 @@ type Usage struct {
 	ReportedUSD                          float64
 }
 
-// totalPrompt is the full prompt size regardless of caching: uncached input plus
-// cache reads. Used to derive a chunk's token count by differencing on backends
-// that can't pre-count.
-func (u Usage) totalPrompt() int64 { return u.Input + u.CacheRead }
+// totalPrompt approximates the full prompt size (uncached input + cache writes +
+// cache reads). On the CLI backend this also absorbs Claude Code's own injected
+// context and multi-turn overhead, so per-file counts derived by differencing are
+// only approximate — use -backend api for exact counts.
+func (u Usage) totalPrompt() int64 { return u.Input + u.CacheRead + u.CacheWrite }
 
 // Schema describes the forced output shape. The API backend turns it into a tool;
 // the CLI backend passes Object to `--json-schema`.
