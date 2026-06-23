@@ -1,6 +1,6 @@
 # Compiled binaries
-/aiscore-spike
-/aiscore-spike.exe
+/ai-score
+/ai-score.exe
 *.exe
 *.out
 *.test
