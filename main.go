@@ -1,12 +1,13 @@
 // aiscore-spike — validates the two-pass OpusTokens (OT) scoring core on one repo.
 //
 //	Substance OT = Implementation OT + Design OT
-//	  Implementation OT = Σ tokens(file) × m(file)   (Pass 2, per file)
+//	  Implementation OT = Σ tokens(file) × m(file)   (Pass 2, batched per call)
 //	  Design OT         = cost to invent the architecture (Pass 1, median-of-N)
 //
 // Token counts always come from Anthropic (never estimated here):
 //   - backend=api : count_tokens (exact, free)
-//   - backend=cli : derived from the real usage Claude Code reports (prefix differencing)
+//   - backend=cli : derived from the real usage Claude Code reports (prefix
+//     differencing, apportioned across a batch by byte share)
 //
 // Usage:
 //   go build && ./aiscore-spike -path <repo> -backend api   # needs ANTHROPIC_API_KEY
@@ -25,8 +26,13 @@ func main() {
 	path := flag.String("path", ".", "repo directory to score")
 	n := flag.Int("n", 3, "median-of-N samples for Design OT")
 	maxFiles := flag.Int("max-files", 40, "max files to score; 0 = all (cost guard)")
+	batchSize := flag.Int("batch", 8, "files scored per Pass-2 call")
+	verifyTop := flag.Int("verify-top", 5, "re-score the K token-heaviest files twice more, median multiplier; 0 = off")
 	backendName := flag.String("backend", "api", "judge backend: api | cli")
 	flag.Parse()
+	if *batchSize < 1 {
+		*batchSize = 1
+	}
 
 	ctx := context.Background()
 
@@ -44,6 +50,11 @@ func main() {
 	}
 	j := NewJudge(be)
 	fmt.Printf("Backend: %s\n", be.Name())
+	if !be.CanPreCount() {
+		fmt.Println("note: the cli backend is a convenience/demo mode — per-file token counts are")
+		fmt.Println("      approximate, prompt caching across invocations is unreliable, and every")
+		fmt.Println("      call draws from your Claude subscription. Use -backend api to compare projects.")
+	}
 
 	// 1. Ingest -------------------------------------------------------------
 	chunks, err := ingest(*path)
@@ -53,8 +64,17 @@ func main() {
 	if len(chunks) == 0 {
 		die("no scorable source files under %s", *path)
 	}
+	// Largest files first: they dominate Σ tokens×m, so if -max-files truncates,
+	// it keeps the files that carry the score instead of the alphabetically first.
+	sort.SliceStable(chunks, func(a, b int) bool {
+		if len(chunks[a].Content) != len(chunks[b].Content) {
+			return len(chunks[a].Content) > len(chunks[b].Content)
+		}
+		return chunks[a].Path < chunks[b].Path
+	})
 	if *maxFiles > 0 && len(chunks) > *maxFiles {
-		fmt.Printf("Found %d source files; scoring the first %d (use -max-files 0 to score all)\n", len(chunks), *maxFiles)
+		fmt.Printf("WARNING: found %d source files; scoring the %d largest. The score is a\n", len(chunks), *maxFiles)
+		fmt.Printf("         lower bound — use -max-files 0 before comparing against another project.\n")
 		chunks = chunks[:*maxFiles]
 	} else {
 		fmt.Printf("Ingested %d files from %s\n", len(chunks), *path)
@@ -85,26 +105,53 @@ func main() {
 	sort.Slice(reports, func(a, b int) bool { return reports[a].DesignOT < reports[b].DesignOT })
 	median := reports[len(reports)/2]
 
-	// 4. Pass 2 per file. On no-pre-count backends, derive tokens from usage
-	//    via a one-time prefix baseline (real counts, differenced — not estimated).
+	// 4. Pass 2 in batches. On no-pre-count backends, derive tokens from usage
+	//    via a one-time prefix baseline, then apportion each batch's prompt
+	//    tokens across its files by byte share (real counts, differenced).
 	var baseline int64
 	if !be.CanPreCount() {
 		probe := &FileChunk{Path: "(baseline)", Content: ""}
-		bu := j.Pass2(ctx, median.ArchitectureMap, probe)
+		bu := j.Pass2Batch(ctx, median.ArchitectureMap, []*FileChunk{probe})
 		baseline = bu.totalPrompt()
 	}
-	for _, c := range chunks {
-		u := j.Pass2(ctx, median.ArchitectureMap, c)
-		if c.Err == nil && !be.CanPreCount() {
-			if t := u.totalPrompt() - baseline; t > 0 {
-				c.Tokens = t
-			} else {
-				c.Tokens = 1
+	for start := 0; start < len(chunks); start += *batchSize {
+		end := start + *batchSize
+		if end > len(chunks) {
+			end = len(chunks)
+		}
+		batch := chunks[start:end]
+		u := j.Pass2Batch(ctx, median.ArchitectureMap, batch)
+		fmt.Printf("  Pass2 batch %d-%d/%d scored\n", start+1, end, len(chunks))
+		if !be.CanPreCount() {
+			batchTokens := u.totalPrompt() - baseline
+			if batchTokens < 1 {
+				batchTokens = 1
+			}
+			var totalBytes int64
+			for _, c := range batch {
+				totalBytes += int64(len(c.Content))
+			}
+			for _, c := range batch {
+				if c.Err != nil {
+					continue
+				}
+				if totalBytes > 0 {
+					c.Tokens = batchTokens * int64(len(c.Content)) / totalBytes
+				}
+				if c.Tokens < 1 {
+					c.Tokens = 1
+				}
 			}
 		}
 	}
 
-	// 5. Aggregate + report -------------------------------------------------
+	// 5. Median-of-3 multipliers for the files that dominate the score ------
+	if *verifyTop > 0 {
+		fmt.Printf("  Verifying multipliers on the %d token-heaviest files (median of 3)\n", *verifyTop)
+		j.VerifyTop(ctx, median.ArchitectureMap, chunks, *verifyTop)
+	}
+
+	// 6. Aggregate + report -------------------------------------------------
 	report(be.Name(), chunks, median, reports, &j.cost)
 }
 

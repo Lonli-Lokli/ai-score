@@ -36,22 +36,31 @@ You need **Go** (one-time) and **Opus access** — either Claude Code *or* an AP
 **2. Run it** — no clone, no build. Pick whichever you have:
 
 ```sh
-# Easiest — if you already use Claude Code (no API key):
-go run github.com/Lonli-Lokli/ai-score@latest -backend cli -path .
-
-# Or with an Anthropic API key:
+# Recommended — with an Anthropic API key (exact token counts, reliable caching):
 ANTHROPIC_API_KEY=sk-ant-... go run github.com/Lonli-Lokli/ai-score@latest -path .
+
+# Convenience/demo mode — if you already use Claude Code (no API key):
+go run github.com/Lonli-Lokli/ai-score@latest -backend cli -path .
 ```
 
 `-path .` scores the current folder — point it anywhere.
 
 **What you get:** a score in **OpusTokens**, an effort tier (*AI-trivial → weeks
-of work*), and a per-file breakdown. Each run costs **~$1–3** of model usage
-(your API key, or drawn from your Claude credits).
+of work*), and a per-file breakdown. Each run costs **~$1–3** of model usage.
 
-Options: `-path` (folder) · `-backend api|cli` · `-n` (accuracy passes) ·
-`-max-files` (cost guard).
+**Comparing two projects:** run once per project with `-backend api` and
+`-max-files 0`, same flags both times, and compare the Substance OT totals.
+The `cli` backend is demo-only for comparisons — its per-file token counts are
+approximate, caching across invocations is unreliable, and it draws from your
+Claude subscription's usage window.
+
+Options: `-path` (folder) · `-backend api|cli` · `-n` (Design-OT accuracy
+passes) · `-max-files` (cost guard; keeps the largest files and warns) ·
+`-batch` (files per Pass-2 call; batching amortizes thinking overhead, the
+dominant cost) · `-verify-top` (median-of-3 multipliers for the K
+token-heaviest files, which dominate the score).
 
 > **Spike caveats:** file-level chunks (not function-level), sequential scoring,
-> placeholder effort-tier thresholds. Lines marked `// VERIFY` confirm
-> `anthropic-sdk-go` / `claude -p` shapes against your installed versions.
+> placeholder effort-tier thresholds. SDK shapes verified against
+> `anthropic-sdk-go v1.58.0`; `claude -p` envelope fields still carry
+> `// VERIFY` markers.

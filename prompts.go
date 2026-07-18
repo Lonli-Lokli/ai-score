@@ -26,8 +26,12 @@ const pass1Instruction = `The full project source is provided above.
 Call report_architecture exactly once. Fill in:
 - architecture_map: a COMPACT blueprint (components, responsibilities, how they
   interact, where the genuine difficulty is, what is boilerplate/generated/glue).
-  A second judge will read ONLY this map to score individual files in context, so
-  make it sufficient for that.
+  A second judge will score individual files while seeing ONLY this map — not the
+  other files — so it must carry everything that judge needs. In particular, list
+  any code that is duplicated across files or trivially derivable from another
+  file (shared patterns, copy-paste variants, generated lookalikes), naming the
+  files involved: that judge must give such code a low multiplier and cannot see
+  the duplication itself.
 - design_ot: OpusTokens to INVENT this architecture itself — NOT the cost of
   typing the code (that is scored separately, per file). Anchors:
     trivial CRUD app ............ ~2,000-10,000 OT
@@ -38,18 +42,23 @@ Call report_architecture exactly once. Fill in:
 
 Respond ONLY by calling report_architecture.`
 
-// pass2Header is prepended to the per-file user turn. The rubric + the
+// pass2Instruction heads the batched per-file user turn. The rubric + the
 // architecture blueprint are supplied as a cached system block.
-const pass2Instruction = `Score the single file below by calling report_chunk.
+const pass2Instruction = `Score EVERY file below by calling report_files exactly once, with one
+results entry per file. Set each entry's path to the file's path exactly as given.
 
-multiplier (m) = the effort to write THIS file's content, PER TOKEN, GIVEN that
-you already have the architecture blueprint and the rest of the codebase. Anchors:
+multiplier (m) = the effort to write THIS file's content, PER TOKEN, GIVEN the
+architecture blueprint above (your only view of the rest of the codebase). Anchors:
     generated / boilerplate ............... ~1
     standard CRUD / glue / config ......... ~2-4
     real domain logic ..................... ~10-30
     novel or subtle algorithm / protocol .. ~50-200
-Code that merely duplicates, or is trivially derivable from, code elsewhere in
-the project gets a LOW m even if it looks complex in isolation. Judge difficulty
-of the CAPABILITY; ignore formatting, style, and how modern the syntax is.
+Code the blueprint identifies as duplicated elsewhere in the project, or that is
+trivially derivable from the blueprint itself, gets a LOW m even if it looks
+complex in isolation. Judge difficulty of the CAPABILITY; ignore formatting,
+style, and how modern the syntax is. Score each file independently — do not
+grade on a curve within the batch.
 
-Respond ONLY by calling report_chunk.`
+Keep reasoning to ONE sentence and evidence to one short quote per file.
+
+Respond ONLY by calling report_files.`
