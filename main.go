@@ -18,8 +18,10 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"sort"
+	"strings"
 )
 
 func main() {
@@ -72,6 +74,7 @@ func main() {
 		}
 		return chunks[a].Path < chunks[b].Path
 	})
+	cov := Coverage{TotalFiles: len(chunks), TotalLOC: locTotal(chunks)}
 	if *maxFiles > 0 && len(chunks) > *maxFiles {
 		fmt.Printf("WARNING: found %d source files; scoring the %d largest. The score is a\n", len(chunks), *maxFiles)
 		fmt.Printf("         lower bound — use -max-files 0 before comparing against another project.\n")
@@ -79,6 +82,8 @@ func main() {
 	} else {
 		fmt.Printf("Ingested %d files from %s\n", len(chunks), *path)
 	}
+	cov.ScoredFiles = len(chunks)
+	cov.ScoredLOC = locTotal(chunks)
 
 	// 2. Pre-count tokens when the backend supports it (api) ----------------
 	if be.CanPreCount() {
@@ -152,10 +157,41 @@ func main() {
 	}
 
 	// 6. Aggregate + report -------------------------------------------------
-	report(be.Name(), chunks, median, reports, &j.cost)
+	report(be.Name(), chunks, median, reports, &j.cost, cov)
 }
 
-func report(backend string, chunks []*FileChunk, median ArchReport, samples []ArchReport, cost *Cost) {
+// Coverage records how much of the ingestable source was actually scored, so a
+// partial scan is always visible in the verdict and on the badge.
+type Coverage struct {
+	TotalFiles, ScoredFiles int
+	TotalLOC, ScoredLOC     int64
+}
+
+// Pct is the scored share of ingestable lines of code, 0-100.
+func (c Coverage) Pct() int {
+	if c.TotalLOC == 0 {
+		return 0
+	}
+	return int(100 * c.ScoredLOC / c.TotalLOC)
+}
+
+// Label is the human/badge form: "full scan" or "NN% scanned".
+func (c Coverage) Label() string {
+	if c.ScoredFiles == c.TotalFiles {
+		return "full scan"
+	}
+	return fmt.Sprintf("%d%% scanned", c.Pct())
+}
+
+func locTotal(chunks []*FileChunk) int64 {
+	var n int64
+	for _, c := range chunks {
+		n += int64(strings.Count(c.Content, "\n") + 1)
+	}
+	return n
+}
+
+func report(backend string, chunks []*FileChunk, median ArchReport, samples []ArchReport, cost *Cost, cov Coverage) {
 	var implOT float64
 	fmt.Printf("\n%-44s %8s %5s  %-15s %s\n", "FILE", "TOKENS", "m", "CATEGORY", "IMPL_OT")
 	fmt.Println(repeat("-", 92))
@@ -181,6 +217,14 @@ func report(backend string, chunks []*FileChunk, median ArchReport, samples []Ar
 	fmt.Printf("  ---------------------------------\n")
 	fmt.Printf("  SUBSTANCE OT      : %12.0f  OT@opus-4.8\n", total)
 	fmt.Printf("  Effort tier       : %s\n", tier(int64(total)))
+	fmt.Printf("  Coverage          : %s (%d/%d files, %d/%d LOC)\n",
+		cov.Label(), cov.ScoredFiles, cov.TotalFiles, cov.ScoredLOC, cov.TotalLOC)
+	if cov.ScoredFiles < cov.TotalFiles {
+		fmt.Printf("                      partial scan — the score is a LOWER BOUND\n")
+	}
+
+	fmt.Printf("\nBadge (paste into your README):\n")
+	fmt.Printf("  [![aiscore](%s)](https://github.com/Lonli-Lokli/ai-score)\n", badgeURL(total, tier(int64(total)), cov))
 
 	fmt.Printf("\nBackend: %s | %d calls | in %d  out %d  cacheRead %d  cacheWrite %d\n",
 		backend, cost.Calls, cost.Input, cost.Output, cost.CacheRead, cost.CacheWrite)
@@ -188,6 +232,35 @@ func report(backend string, chunks []*FileChunk, median ArchReport, samples []Ar
 	if cost.ReportedUSD > 0 {
 		fmt.Printf("Claude-reported cost:              $%.3f\n", cost.ReportedUSD)
 	}
+}
+
+// badgeURL renders the verdict as a shields.io static badge so every scored
+// repo shows the same format, coverage included.
+func badgeURL(total float64, tierLabel string, cov Coverage) string {
+	msg := fmt.Sprintf("%s OT · %s · %s", compactOT(total), tierLabel, cov.Label())
+	return "https://img.shields.io/badge/aiscore-" + shieldsEscape(msg) + "-8a2be2"
+}
+
+// compactOT formats an OT total the way it should read on a badge: 8.1M, 240k.
+func compactOT(v float64) string {
+	switch {
+	case v >= 1e6:
+		return fmt.Sprintf("%.1fM", v/1e6)
+	case v >= 1e3:
+		return fmt.Sprintf("%.0fk", v/1e3)
+	default:
+		return fmt.Sprintf("%.0f", v)
+	}
+}
+
+// shieldsEscape encodes a message for a shields.io path segment: literal dashes
+// and underscores double, spaces become underscores, the rest is URL-escaped.
+func shieldsEscape(s string) string {
+	s = strings.ReplaceAll(s, "-", "--")
+	s = strings.ReplaceAll(s, "_", "__")
+	s = strings.ReplaceAll(s, " ", "_")
+	// PathEscape leaves "+" literal, but badge proxies may decode it as a space.
+	return strings.ReplaceAll(url.PathEscape(s), "+", "%2B")
 }
 
 // tier maps OT → a human label. PLACEHOLDER thresholds — calibrate against a corpus.

@@ -73,3 +73,19 @@ func TestMedian(t *testing.T) {
 		t.Fatal("single median")
 	}
 }
+
+func TestBadgeAndCoverage(t *testing.T) {
+	cov := Coverage{TotalFiles: 780, ScoredFiles: 120, TotalLOC: 100000, ScoredLOC: 52000}
+	if cov.Label() != "52% scanned" {
+		t.Fatalf("label: %s", cov.Label())
+	}
+	full := Coverage{TotalFiles: 5, ScoredFiles: 5, TotalLOC: 10, ScoredLOC: 10}
+	if full.Label() != "full scan" {
+		t.Fatalf("full label: %s", full.Label())
+	}
+	u := badgeURL(8093820, "weeks+", cov)
+	want := "https://img.shields.io/badge/aiscore-8.1M_OT_%C2%B7_weeks%2B_%C2%B7_52%25_scanned-8a2be2"
+	if u != want {
+		t.Fatalf("badge url:\n got %s\nwant %s", u, want)
+	}
+}

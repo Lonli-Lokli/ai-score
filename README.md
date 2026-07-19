@@ -135,7 +135,17 @@ different judge models are not comparable.
   ---------------------------------
   SUBSTANCE OT      :      8,093,820  OT@opus-4.8
   Effort tier       : weeks+
+  Coverage          : 52% scanned (120/780 files, 69,870/135,042 LOC)
+                      partial scan — the score is a LOWER BOUND
+
+Badge (paste into your README):
+  [![aiscore](https://img.shields.io/badge/aiscore-8.1M_OT_·_weeks%2B_·_52%25_scanned-8a2be2)](https://github.com/Lonli-Lokli/ai-score)
 ```
+
+**Coverage is part of the verdict.** A score is only comparable when you know
+how much of the repo it saw, so every run reports the scanned share of lines of
+code, and the emitted badge says either `full scan` or `NN% scanned` — a partial
+scan can never masquerade as a whole-repo score.
 
 with per-file discrimination like:
 
