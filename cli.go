@@ -38,7 +38,8 @@ type cliEnvelope struct {
 	} `json:"usage"`
 }
 
-func (b *cliBackend) Score(ctx context.Context, system, user string, schema Schema, maxTokens int64) (string, Usage, error) {
+func (b *cliBackend) Score(ctx context.Context, system, user string, schema Schema, maxTokens int64, opts ScoreOpts) (string, Usage, error) {
+	_ = opts // claude -p exposes no effort or cache-TTL controls
 	schemaJSON, err := json.Marshal(schema.Object)
 	if err != nil {
 		return "", Usage{}, err

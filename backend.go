@@ -16,12 +16,24 @@ type Usage struct {
 // only approximate — use -backend api for exact counts.
 func (u Usage) totalPrompt() int64 { return u.Input + u.CacheRead + u.CacheWrite }
 
-// Schema describes the forced output shape. The API backend turns it into a tool;
-// the CLI backend passes Object to `--json-schema`.
+// Schema describes the forced output shape. The API backend turns it into a
+// strict tool; the CLI backend passes Object to `--json-schema`.
 type Schema struct {
 	Name        string
 	Description string
 	Object      map[string]any // full JSON Schema: {type, properties, required, additionalProperties}
+}
+
+// ScoreOpts tunes one judge call.
+type ScoreOpts struct {
+	// Effort is the output_config.effort level ("low".."max"); "" = API default.
+	// The CLI backend ignores it (claude -p exposes no effort flag).
+	Effort string
+	// LongCache uses a 1h cache TTL on the system prefix instead of the 5m
+	// default. Worth the 2x (vs 1.25x) write premium only for the large Pass-1
+	// repo block, where a minutes-long thinking turn can outlive the 5m TTL and
+	// force a full re-write on the next sample.
+	LongCache bool
 }
 
 // Backend is the pluggable judge: API (per-token, exact count_tokens) or local
@@ -34,7 +46,7 @@ type Backend interface {
 	CountTokens(ctx context.Context, text string) (int64, error)
 	// Score sends system+user constrained to schema; returns the structured JSON
 	// (as a string to be unmarshalled) plus usage.
-	Score(ctx context.Context, system, user string, schema Schema, maxTokens int64) (string, Usage, error)
+	Score(ctx context.Context, system, user string, schema Schema, maxTokens int64, opts ScoreOpts) (string, Usage, error)
 }
 
 // ---- cost accounting --------------------------------------------------------

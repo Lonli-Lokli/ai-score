@@ -1,12 +1,13 @@
 // aiscore-spike — validates the two-pass OpusTokens (OT) scoring core on one repo.
 //
 //	Substance OT = Implementation OT + Design OT
-//	  Implementation OT = Σ tokens(file) × m(file)   (Pass 2, per file)
+//	  Implementation OT = Σ tokens(file) × m(file)   (Pass 2, batched per call)
 //	  Design OT         = cost to invent the architecture (Pass 1, median-of-N)
 //
 // Token counts always come from Anthropic (never estimated here):
 //   - backend=api : count_tokens (exact, free)
-//   - backend=cli : derived from the real usage Claude Code reports (prefix differencing)
+//   - backend=cli : derived from the real usage Claude Code reports (prefix
+//     differencing, apportioned across a batch by byte share)
 //
 // Usage:
 //   go build && ./aiscore-spike -path <repo> -backend api   # needs ANTHROPIC_API_KEY
@@ -17,16 +18,23 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"sort"
+	"strings"
 )
 
 func main() {
 	path := flag.String("path", ".", "repo directory to score")
 	n := flag.Int("n", 3, "median-of-N samples for Design OT")
 	maxFiles := flag.Int("max-files", 40, "max files to score; 0 = all (cost guard)")
+	batchSize := flag.Int("batch", 8, "files scored per Pass-2 call")
+	verifyTop := flag.Int("verify-top", 5, "re-score the K token-heaviest files twice more, median multiplier; 0 = off")
 	backendName := flag.String("backend", "api", "judge backend: api | cli")
 	flag.Parse()
+	if *batchSize < 1 {
+		*batchSize = 1
+	}
 
 	ctx := context.Background()
 
@@ -44,6 +52,11 @@ func main() {
 	}
 	j := NewJudge(be)
 	fmt.Printf("Backend: %s\n", be.Name())
+	if !be.CanPreCount() {
+		fmt.Println("note: the cli backend is a convenience/demo mode — per-file token counts are")
+		fmt.Println("      approximate, prompt caching across invocations is unreliable, and every")
+		fmt.Println("      call draws from your Claude subscription. Use -backend api to compare projects.")
+	}
 
 	// 1. Ingest -------------------------------------------------------------
 	chunks, err := ingest(*path)
@@ -53,12 +66,24 @@ func main() {
 	if len(chunks) == 0 {
 		die("no scorable source files under %s", *path)
 	}
+	// Largest files first: they dominate Σ tokens×m, so if -max-files truncates,
+	// it keeps the files that carry the score instead of the alphabetically first.
+	sort.SliceStable(chunks, func(a, b int) bool {
+		if len(chunks[a].Content) != len(chunks[b].Content) {
+			return len(chunks[a].Content) > len(chunks[b].Content)
+		}
+		return chunks[a].Path < chunks[b].Path
+	})
+	cov := Coverage{TotalFiles: len(chunks), TotalLOC: locTotal(chunks)}
 	if *maxFiles > 0 && len(chunks) > *maxFiles {
-		fmt.Printf("Found %d source files; scoring the first %d (use -max-files 0 to score all)\n", len(chunks), *maxFiles)
+		fmt.Printf("WARNING: found %d source files; scoring the %d largest. The score is a\n", len(chunks), *maxFiles)
+		fmt.Printf("         lower bound — use -max-files 0 before comparing against another project.\n")
 		chunks = chunks[:*maxFiles]
 	} else {
 		fmt.Printf("Ingested %d files from %s\n", len(chunks), *path)
 	}
+	cov.ScoredFiles = len(chunks)
+	cov.ScoredLOC = locTotal(chunks)
 
 	// 2. Pre-count tokens when the backend supports it (api) ----------------
 	if be.CanPreCount() {
@@ -85,30 +110,88 @@ func main() {
 	sort.Slice(reports, func(a, b int) bool { return reports[a].DesignOT < reports[b].DesignOT })
 	median := reports[len(reports)/2]
 
-	// 4. Pass 2 per file. On no-pre-count backends, derive tokens from usage
-	//    via a one-time prefix baseline (real counts, differenced — not estimated).
+	// 4. Pass 2 in batches. On no-pre-count backends, derive tokens from usage
+	//    via a one-time prefix baseline, then apportion each batch's prompt
+	//    tokens across its files by byte share (real counts, differenced).
 	var baseline int64
 	if !be.CanPreCount() {
 		probe := &FileChunk{Path: "(baseline)", Content: ""}
-		bu := j.Pass2(ctx, median.ArchitectureMap, probe)
+		bu := j.Pass2Batch(ctx, median.ArchitectureMap, []*FileChunk{probe})
 		baseline = bu.totalPrompt()
 	}
-	for _, c := range chunks {
-		u := j.Pass2(ctx, median.ArchitectureMap, c)
-		if c.Err == nil && !be.CanPreCount() {
-			if t := u.totalPrompt() - baseline; t > 0 {
-				c.Tokens = t
-			} else {
-				c.Tokens = 1
+	for start := 0; start < len(chunks); start += *batchSize {
+		end := start + *batchSize
+		if end > len(chunks) {
+			end = len(chunks)
+		}
+		batch := chunks[start:end]
+		u := j.Pass2Batch(ctx, median.ArchitectureMap, batch)
+		fmt.Printf("  Pass2 batch %d-%d/%d scored\n", start+1, end, len(chunks))
+		if !be.CanPreCount() {
+			batchTokens := u.totalPrompt() - baseline
+			if batchTokens < 1 {
+				batchTokens = 1
+			}
+			var totalBytes int64
+			for _, c := range batch {
+				totalBytes += int64(len(c.Content))
+			}
+			for _, c := range batch {
+				if c.Err != nil {
+					continue
+				}
+				if totalBytes > 0 {
+					c.Tokens = batchTokens * int64(len(c.Content)) / totalBytes
+				}
+				if c.Tokens < 1 {
+					c.Tokens = 1
+				}
 			}
 		}
 	}
 
-	// 5. Aggregate + report -------------------------------------------------
-	report(be.Name(), chunks, median, reports, &j.cost)
+	// 5. Median-of-3 multipliers for the files that dominate the score ------
+	if *verifyTop > 0 {
+		fmt.Printf("  Verifying multipliers on the %d token-heaviest files (median of 3)\n", *verifyTop)
+		j.VerifyTop(ctx, median.ArchitectureMap, chunks, *verifyTop)
+	}
+
+	// 6. Aggregate + report -------------------------------------------------
+	report(be.Name(), chunks, median, reports, &j.cost, cov)
 }
 
-func report(backend string, chunks []*FileChunk, median ArchReport, samples []ArchReport, cost *Cost) {
+// Coverage records how much of the ingestable source was actually scored, so a
+// partial scan is always visible in the verdict and on the badge.
+type Coverage struct {
+	TotalFiles, ScoredFiles int
+	TotalLOC, ScoredLOC     int64
+}
+
+// Pct is the scored share of ingestable lines of code, 0-100.
+func (c Coverage) Pct() int {
+	if c.TotalLOC == 0 {
+		return 0
+	}
+	return int(100 * c.ScoredLOC / c.TotalLOC)
+}
+
+// Label is the human/badge form: "full scan" or "NN% scanned".
+func (c Coverage) Label() string {
+	if c.ScoredFiles == c.TotalFiles {
+		return "full scan"
+	}
+	return fmt.Sprintf("%d%% scanned", c.Pct())
+}
+
+func locTotal(chunks []*FileChunk) int64 {
+	var n int64
+	for _, c := range chunks {
+		n += int64(strings.Count(c.Content, "\n") + 1)
+	}
+	return n
+}
+
+func report(backend string, chunks []*FileChunk, median ArchReport, samples []ArchReport, cost *Cost, cov Coverage) {
 	var implOT float64
 	fmt.Printf("\n%-44s %8s %5s  %-15s %s\n", "FILE", "TOKENS", "m", "CATEGORY", "IMPL_OT")
 	fmt.Println(repeat("-", 92))
@@ -134,6 +217,14 @@ func report(backend string, chunks []*FileChunk, median ArchReport, samples []Ar
 	fmt.Printf("  ---------------------------------\n")
 	fmt.Printf("  SUBSTANCE OT      : %12.0f  OT@opus-4.8\n", total)
 	fmt.Printf("  Effort tier       : %s\n", tier(int64(total)))
+	fmt.Printf("  Coverage          : %s (%d/%d files, %d/%d LOC)\n",
+		cov.Label(), cov.ScoredFiles, cov.TotalFiles, cov.ScoredLOC, cov.TotalLOC)
+	if cov.ScoredFiles < cov.TotalFiles {
+		fmt.Printf("                      partial scan — the score is a LOWER BOUND\n")
+	}
+
+	fmt.Printf("\nBadge (paste into your README):\n")
+	fmt.Printf("  [![aiscore](%s)](https://github.com/Lonli-Lokli/ai-score)\n", badgeURL(total, tier(int64(total)), cov))
 
 	fmt.Printf("\nBackend: %s | %d calls | in %d  out %d  cacheRead %d  cacheWrite %d\n",
 		backend, cost.Calls, cost.Input, cost.Output, cost.CacheRead, cost.CacheWrite)
@@ -141,6 +232,35 @@ func report(backend string, chunks []*FileChunk, median ArchReport, samples []Ar
 	if cost.ReportedUSD > 0 {
 		fmt.Printf("Claude-reported cost:              $%.3f\n", cost.ReportedUSD)
 	}
+}
+
+// badgeURL renders the verdict as a shields.io static badge so every scored
+// repo shows the same format, coverage included.
+func badgeURL(total float64, tierLabel string, cov Coverage) string {
+	msg := fmt.Sprintf("%s OT · %s · %s", compactOT(total), tierLabel, cov.Label())
+	return "https://img.shields.io/badge/aiscore-" + shieldsEscape(msg) + "-8a2be2"
+}
+
+// compactOT formats an OT total the way it should read on a badge: 8.1M, 240k.
+func compactOT(v float64) string {
+	switch {
+	case v >= 1e6:
+		return fmt.Sprintf("%.1fM", v/1e6)
+	case v >= 1e3:
+		return fmt.Sprintf("%.0fk", v/1e3)
+	default:
+		return fmt.Sprintf("%.0f", v)
+	}
+}
+
+// shieldsEscape encodes a message for a shields.io path segment: literal dashes
+// and underscores double, spaces become underscores, the rest is URL-escaped.
+func shieldsEscape(s string) string {
+	s = strings.ReplaceAll(s, "-", "--")
+	s = strings.ReplaceAll(s, "_", "__")
+	s = strings.ReplaceAll(s, " ", "_")
+	// PathEscape leaves "+" literal, but badge proxies may decode it as a space.
+	return strings.ReplaceAll(url.PathEscape(s), "+", "%2B")
 }
 
 // tier maps OT → a human label. PLACEHOLDER thresholds — calibrate against a corpus.
